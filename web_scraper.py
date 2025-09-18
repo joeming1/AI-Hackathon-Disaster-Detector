@@ -36,7 +36,7 @@ def check_weather(location):
             data = r.json()
             weather = data["weather"][0]["main"].lower()
             description = data["weather"][0]["description"]
-            if any(w in weather for w in ["rain", "storm", "haze", "cloud"]):
+            if any(w in weather for w in ["rain", "storm", "haze","cloud"]):
                 return True, description
             else:
                 return False, description
@@ -81,7 +81,7 @@ def main():
         print(f"Found {len(city_tweets)} city-level tweets")
         for tweet in city_tweets:
             # Try to cross-check with a few key cities
-            for loc in ["Kuala Lumpur", "Penang", "Johor Bahru", "Kota Kinabalu", "Kuching"]:
+            for loc in ["Kuala Lumpur", "Penang", "Johor Bahru", "Kota Kinabalu", "Kuching","Ipoh","Alor Setar","Kota Bharu", "Kuala Terengganu","Kuantan","Melaka","Kangar"]:
                 valid, weather_desc = check_weather(loc)
                 if valid:
                     send_to_kinesis(tweet, loc, weather_desc)
@@ -93,7 +93,7 @@ def main():
         if state_tweets:
             print(f"Found {len(state_tweets)} state-level tweets")
             for tweet in state_tweets:
-                for loc in ["Selangor", "Sabah", "Sarawak", "Johor", "Kelantan"]:
+                for loc in ["Selangor", "Sabah", "Sarawak", "Johor", "Kelantan","Kedah","Malacca","Pahang","Sabah","Sarawak","Terengganu","Labuan","Putrajaya"]:
                     valid, weather_desc = check_weather(loc)
                     if valid:
                         send_to_kinesis(tweet, loc, weather_desc)
