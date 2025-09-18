@@ -1,50 +1,48 @@
 import tweepy
+import boto3
+import json
 
-bearer_token = "AAAAAAAAAAAAAAAAAAAAAIv94AEAAAAA5ShdVc2N1KMkVDhlXuH1fMJNz84%3DqChG0VVJNjG7PybSUNX44mrZgjbi9TdwnW0ffvJ3jGMyhq2RCf"
+# --- X (Twitter) API ---
+bearer_token = "AAAAAAAAAAAAAAAAAAAAAIv94AEAAAAA8JJcRJswFhZ8qHNmKicRfr9CziE%3DIYs2GsdChH5SicGfhpCtC5Uy84BBALhGxRXNe0fCDsmEfji1Zv"
+
 client = tweepy.Client(bearer_token=bearer_token)
+
+# --- AWS Kinesis Client ---
+kinesis = boto3.client(
+    "kinesis",
+    region_name="ap-southeast-5"  # Malaysia region
+)
+
+stream_name = "DisasterTweetsStream"
 
 # Disaster keywords
 disaster = "(flood OR banjir OR landslide OR earthquake OR haze OR fire OR forestfire)"
 
-# Major cities in Malaysia
-cities = """(
-Kuala Lumpur OR KL OR Shah Alam OR Klang OR Subang Jaya OR Petaling Jaya OR Kajang OR Seremban OR Putrajaya OR
-George Town OR Penang OR Butterworth OR Bukit Mertajam OR Seberang Perai OR
-Johor Bahru OR Iskandar Puteri OR Batu Pahat OR Kluang OR Muar OR Segamat OR
-Kota Kinabalu OR Sandakan OR Tawau OR Lahad Datu OR Kudat OR
-Kuching OR Miri OR Sibu OR Bintulu OR
-Ipoh OR Taiping OR Teluk Intan OR
-Alor Setar OR Sungai Petani OR Kulim OR
-Kota Bharu OR Tanah Merah OR
-Kuala Terengganu OR Kemaman OR Dungun OR
-Kuantan OR Bentong OR
-Melaka City OR Ayer Keroh OR Jasin OR
-Kangar OR Labuan
-)"""
+cities = """(Kuala Lumpur)"""
 
-# State-level keywords as fallback
-states = """(
-Malaysia OR Selangor OR Penang OR Perlis OR Johor OR Kedah OR Kelantan OR Malacca OR
-Negeri Sembilan OR Pahang OR Sabah OR Sarawak OR Terengganu OR Labuan OR Putrajaya
-)"""
-
-# First: try city-level query
 query_cities = disaster + " " + cities + " -is:retweet lang:en"
+
+# Fetch tweets
 tweets = client.search_recent_tweets(query=query_cities, max_results=10)
 
 if tweets.data:
-    print("✅ Found tweets at CITY level:\n")
     for tweet in tweets.data:
-        print(tweet.text, "\n")
+        print("Sending tweet:", tweet.text)
+
+        # Prepare tweet payload
+        payload = {
+            "id": tweet.id,
+            "text": tweet.text,
+        }
+
+        # Send to AWS Kinesis
+        kinesis.put_record(
+            StreamName=stream_name,
+            Data=json.dumps(payload).encode("utf-8"),
+            PartitionKey=str(tweet.id)  # partition by tweet ID
+        )
+
+    print("✅ Successfully pushed tweets to Kinesis!")
+
 else:
-    print("⚠️ No city-level results, trying STATE level...\n")
-    # Fallback: try state-level query
-    query_states = disaster + " " + states + " -is:retweet lang:en"
-    tweets = client.search_recent_tweets(query=query_states, max_results=10)
-    
-    if tweets.data:
-        print("✅ Found tweets at STATE level:\n")
-        for tweet in tweets.data:
-            print(tweet.text, "\n")
-    else:
-        print("❌ No relevant tweets found at both city and state levels.")
+    print("⚠️ No tweets found for cities.")
