@@ -2,32 +2,48 @@ import tweepy
 import boto3
 import json
 import requests
-import time
+import csv
+import io
 
 # --- Twitter API ---
-bearer_token = "AAAAAAAAAAAAAAAAAAAAAIv94AEAAAAA8JJcRJswFhZ8qHNmKicRfr9CziE%3DIYs2GsdChH5SicGfhpCtC5Uy84BBALhGxRXNe0fCDsmEfji1Zv"
+bearer_token = "YOUR_TWITTER_BEARE"
 client = tweepy.Client(bearer_token=bearer_token)
 
-# --- AWS Kinesis Client ---
-kinesis = boto3.client(
-    "kinesis",
-    region_name="ap-southeast-1" #SG server
-)
-stream_name = "DisasterDataStream"
+# --- AWS Kinesis Firehose Client ---
+firehose = boto3.client("firehose", region_name="ap-southeast-1")
+firehose_name = "DisasterDataFirehose"  # Firehose must be configured to deliver to S3
 
 # --- OpenWeatherMap API ---
-OWM_API_KEY = "a00d543e9ee9d53004281d0b7b55aa10"
+OWM_API_KEY = "YOUR_OWM_KEY"
 OWM_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 # --- Keywords ---
-disaster = "(flood OR banjir OR landslide OR earthquake OR haze OR fire OR forestfire)"
-cities = "(Kuala Lumpur OR KL OR Penang OR Johor Bahru OR Kota Kinabalu OR Kuching OR Ipoh OR Alor Setar OR Kota Bharu OR Kuala Terengganu OR Kuantan OR Melaka OR Kangar)"
-states = "(Selangor OR Penang OR Johor OR Kedah OR Kelantan OR Malacca OR Pahang OR Sabah OR Sarawak OR Terengganu OR Labuan OR Putrajaya)"
+disaster_keywords = {
+    "flood": ["flood", "banjir"],
+    "landslide": ["landslide"],
+    "earthquake": ["earthquake"],
+    "haze": ["haze"],
+    "fire": ["fire", "forestfire"]
+}
 
-max_results = 10  # per request
+cities = ["Kuala Lumpur", "Penang", "Johor Bahru", "Kota Kinabalu", "Kuching",
+          "Ipoh", "Alor Setar", "Kota Bharu", "Kuala Terengganu", "Kuantan",
+          "Melaka", "Kangar"]
+states = ["Selangor", "Penang", "Johor", "Kedah", "Kelantan",
+          "Malacca", "Pahang", "Sabah", "Sarawak", "Terengganu", "Labuan", "Putrajaya"]
+
+max_results = 10
 seen_tweet_ids = set()
 
-# --- OpenWeatherMap cross-check ---
+# --- Detect disaster type ---
+def detect_disaster(text):
+    text_lower = text.lower()
+    for dtype, keywords in disaster_keywords.items():
+        if any(word in text_lower for word in keywords):
+            return dtype
+    return "unknown"
+
+# --- Weather cross-check ---
 def check_weather(location):
     try:
         params = {"q": location, "appid": OWM_API_KEY, "units": "metric"}
@@ -36,7 +52,7 @@ def check_weather(location):
             data = r.json()
             weather = data["weather"][0]["main"].lower()
             description = data["weather"][0]["description"]
-            if any(w in weather for w in ["rain", "storm", "haze","cloud"]):
+            if any(w in weather for w in ["rain", "storm", "haze", "cloud"]):
                 return True, description
             else:
                 return False, description
@@ -45,23 +61,26 @@ def check_weather(location):
     except Exception as e:
         return False, str(e)
 
-# --- Send to Kinesis ---
-def send_to_kinesis(tweet, location, weather_desc):
+# --- Send to Firehose in CSV format ---
+def send_to_firehose(tweet, location, weather_desc):
     if tweet.id in seen_tweet_ids:
         return
-    payload = {
-        "id": tweet.id,
-        "text": tweet.text,
-        "location": location,
-        "weather_desc": weather_desc
-    }
-    kinesis.put_record(
-        StreamName=stream_name,
-        Data=json.dumps(payload).encode("utf-8"),
-        PartitionKey=str(tweet.id)
+
+    disaster_type = detect_disaster(tweet.text)
+
+    # Build CSV row
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([tweet.id, tweet.text.replace("\n", " "), location, weather_desc, disaster_type])
+    csv_data = output.getvalue()
+
+    firehose.put_record(
+        DeliveryStreamName=firehose_name,
+        Record={"Data": csv_data.encode("utf-8")}
     )
+
     seen_tweet_ids.add(tweet.id)
-    print(f"✅ Sent to Kinesis (Weather OK: {weather_desc}): {tweet.text}")
+    print(f"✅ Sent to Firehose CSV: {tweet.text[:50]}... ({disaster_type})")
 
 # --- Fetch Tweets ---
 def fetch_tweets(query):
@@ -74,32 +93,33 @@ def fetch_tweets(query):
 
 # --- Main ---
 def main():
-    query_cities = f"{disaster} {cities} -is:retweet lang:en"
+    query_cities = f"({' OR '.join(disaster_keywords.keys())}) ({' OR '.join(cities)}) -is:retweet lang:en"
     city_tweets = fetch_tweets(query_cities)
 
     if city_tweets:
         print(f"Found {len(city_tweets)} city-level tweets")
         for tweet in city_tweets:
-            # Try to cross-check with a few key cities
-            for loc in ["Kuala Lumpur", "Penang", "Johor Bahru", "Kota Kinabalu", "Kuching","Ipoh","Alor Setar","Kota Bharu", "Kuala Terengganu","Kuantan","Melaka","Kangar"]:
+            for loc in cities:
                 valid, weather_desc = check_weather(loc)
                 if valid:
-                    send_to_kinesis(tweet, loc, weather_desc)
-                    break  # only need one valid location
+                    send_to_firehose(tweet, loc, weather_desc)
+                    break
     else:
         print("⚠️ No city-level tweets found, trying state-level fallback")
-        query_states = f"{disaster} {states} -is:retweet lang:en"
+        query_states = f"({' OR '.join(disaster_keywords.keys())}) ({' OR '.join(states)}) -is:retweet lang:en"
         state_tweets = fetch_tweets(query_states)
         if state_tweets:
             print(f"Found {len(state_tweets)} state-level tweets")
             for tweet in state_tweets:
-                for loc in ["Selangor", "Sabah", "Sarawak", "Johor", "Kelantan","Kedah","Malacca","Pahang","Sabah","Sarawak","Terengganu","Labuan","Putrajaya"]:
+                for loc in states:
                     valid, weather_desc = check_weather(loc)
                     if valid:
-                        send_to_kinesis(tweet, loc, weather_desc)
+                        send_to_firehose(tweet, loc, weather_desc)
                         break
         else:
-            print("❌ No relevant tweets found at both city and state levels")
+            print("❌ No relevant tweets found")
 
-if __name__ == "__main__":
+# --- Lambda entry point ---
+def lambda_handler(event, context):
     main()
+    return {"statusCode": 200, "body": json.dumps("Execution completed")}
